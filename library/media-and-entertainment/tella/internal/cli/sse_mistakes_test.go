@@ -3,10 +3,12 @@
 package cli
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // PATCH(library): tests for parseMistakesSSE + analyzeMistakes. Pins the
@@ -54,6 +56,22 @@ func TestParseMistakesSSE_MultipleMistakesPerEvent(t *testing.T) {
 	}
 }
 
+func TestParseMistakesSSE_BareMistakesArray(t *testing.T) {
+	stream := strings.NewReader(`event: Mistakes
+data: [{"trim":{"startTime":1000,"duration":100},"wordsToCut":"a","confidence":1.0},{"trim":{"startTime":2000,"duration":200},"wordsToCut":"b","confidence":0.95}]
+`)
+	got, unknown, err := parseMistakesSSE(stream)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if unknown != 0 || len(got) != 2 {
+		t.Fatalf("got %d mistakes, %d unknown; want 2 mistakes, 0 unknown", len(got), unknown)
+	}
+	if got[1].WordsToCut != "b" {
+		t.Fatalf("got[1].WordsToCut = %q, want b", got[1].WordsToCut)
+	}
+}
+
 func TestParseMistakesSSE_IgnoresNonMistakesEventTypes(t *testing.T) {
 	stream := strings.NewReader(`data: ["KeepAlive", {}]
 
@@ -73,6 +91,25 @@ data: ["Done", {}]
 	}
 }
 
+func TestParseMistakesSSE_SkipsMalformedMistakesBatch(t *testing.T) {
+	stream := strings.NewReader(`data: ["Mistakes",[{"trim":{"startTime":100,"duration":50},"confidence":1.0}]]
+
+data: ["Mistakes",{"not":"an array"}]
+
+data: ["Mistakes",[{"trim":{"startTime":200,"duration":75},"confidence":1.0}]]
+`)
+	mistakes, unknown, err := parseMistakesSSE(stream)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mistakes) != 2 {
+		t.Fatalf("got %d mistakes, want 2 valid mistakes despite malformed middle batch", len(mistakes))
+	}
+	if unknown != 1 {
+		t.Fatalf("unknown = %d, want 1 malformed batch", unknown)
+	}
+}
+
 func TestParseMistakesSSE_SkipsBlankAndCommentLines(t *testing.T) {
 	stream := strings.NewReader(`:heartbeat
 
@@ -88,34 +125,10 @@ data: ["Mistakes",[{"trim":{"startTime":100,"duration":50},"confidence":1.0}]]
 	}
 }
 
-func TestMistakesToCuts_DropsZeroDuration(t *testing.T) {
-	mistakes := []detectedMistake{
-		{Trim: struct {
-			StartTime float64 `json:"startTime"`
-			Duration  float64 `json:"duration"`
-		}{StartTime: 100, Duration: 50}},
-		{Trim: struct {
-			StartTime float64 `json:"startTime"`
-			Duration  float64 `json:"duration"`
-		}{StartTime: 200, Duration: 0}}, // dropped
-		{Trim: struct {
-			StartTime float64 `json:"startTime"`
-			Duration  float64 `json:"duration"`
-		}{StartTime: 300, Duration: -10}}, // dropped
-	}
-	cuts := mistakesToCuts(mistakes)
-	if len(cuts) != 1 {
-		t.Fatalf("got %d cuts, want 1", len(cuts))
-	}
-	if cuts[0]["startTime"].(float64) != 100 || cuts[0]["duration"].(float64) != 50 {
-		t.Errorf("cuts[0] = %+v, want {startTime:100, duration:50}", cuts[0])
-	}
-}
-
-func TestAnalyzeMistakes_HappyPath(t *testing.T) {
+func TestPostSSEAndParseMistakesSSE_HappyPath(t *testing.T) {
 	// Stand up a fake unofficial AI service that returns a deterministic
-	// SSE stream. Verifies analyzeMistakes wires the request body, parses
-	// the response, and returns mistakes + status code correctly.
+	// SSE stream. Verifies the lower-level postSSE + parseMistakesSSE
+	// wiring before analyzeMistakes adds its URL/body construction.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ai-mistakes/analyze-scene" {
 			http.Error(w, "wrong path", http.StatusNotFound)
@@ -135,14 +148,10 @@ data: ["Mistakes",[{"trim":{"startTime":5000,"duration":250},"wordsToCut":"like"
 	}))
 	defer srv.Close()
 
-	// Patch unofficialAIHost via a local override — analyzeMistakes builds
-	// the URL from the constant, so we exercise it with a one-off helper
-	// that uses the same client wiring.
 	uc := &unofficialClient{
 		http:   srv.Client(),
 		cookie: "fake-session=1",
 	}
-	// Build the request manually using the same path analyzeMistakes does.
 	stream, status, err := uc.postSSE(srv.URL+"/ai-mistakes/analyze-scene", map[string]any{
 		"storyID": "vid_abc",
 		"sceneID": "cl_xyz",
@@ -163,6 +172,47 @@ data: ["Mistakes",[{"trim":{"startTime":5000,"duration":250},"wordsToCut":"like"
 	}
 }
 
+func TestAnalyzeMistakes_HappyPath(t *testing.T) {
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ai-mistakes/analyze-scene" {
+			http.Error(w, "wrong path", http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: ["Mistakes",[{"trim":{"startTime":5000,"duration":250},"wordsToCut":"like","confidence":0.97}]]
+`))
+	}))
+	defer srv.Close()
+
+	uc := &unofficialClient{
+		http:      srv.Client(),
+		cookie:    "fake-session=1",
+		aiBaseURL: srv.URL,
+	}
+	mistakes, unknown, status, err := analyzeMistakes(uc, "vid_abc", "cl_xyz")
+	if err != nil {
+		t.Fatalf("analyzeMistakes: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if unknown != 0 {
+		t.Fatalf("unknown = %d, want 0", unknown)
+	}
+	if gotBody["storyID"] != "vid_abc" || gotBody["sceneID"] != "cl_xyz" {
+		t.Fatalf("request body = %+v, want storyID=vid_abc sceneID=cl_xyz", gotBody)
+	}
+	if len(mistakes) != 1 || mistakes[0].WordsToCut != "like" {
+		t.Fatalf("mistakes = %+v, want one parsed mistake for like", mistakes)
+	}
+}
+
 func TestUnofficialClient_RefusesEmptyCookie(t *testing.T) {
 	_, err := newUnofficialClient("", 5)
 	if err == nil {
@@ -170,6 +220,24 @@ func TestUnofficialClient_RefusesEmptyCookie(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "TELLA_SESSION_COOKIE") {
 		t.Errorf("error should mention TELLA_SESSION_COOKIE; got: %v", err)
+	}
+}
+
+func TestUnofficialClient_EnforcesMinimumSSETimeout(t *testing.T) {
+	uc, err := newUnofficialClient("session=abc", 30*time.Second)
+	if err != nil {
+		t.Fatalf("newUnofficialClient: %v", err)
+	}
+	if uc.http.Timeout != 60*time.Second {
+		t.Fatalf("timeout = %s, want 1m0s minimum for SSE streams", uc.http.Timeout)
+	}
+
+	uc, err = newUnofficialClient("session=abc", 90*time.Second)
+	if err != nil {
+		t.Fatalf("newUnofficialClient: %v", err)
+	}
+	if uc.http.Timeout != 90*time.Second {
+		t.Fatalf("timeout = %s, want caller-provided timeout above minimum", uc.http.Timeout)
 	}
 }
 
@@ -222,5 +290,26 @@ func TestUnofficialClient_PostSSESurfaces401WithHelpfulMessage(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "session cookie expired") {
 		t.Errorf("error should mention 'session cookie expired'; got: %v", err)
+	}
+}
+
+func TestUnofficialClient_PostSSEClosesNon2xxBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	uc, _ := newUnofficialClient("fake=1", 5)
+	uc.http = srv.Client()
+
+	stream, status, err := uc.postSSE(srv.URL+"/", map[string]any{})
+	if stream != nil {
+		t.Fatal("expected nil stream for non-2xx response")
+	}
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", status)
+	}
+	if err == nil || !strings.Contains(err.Error(), "service unavailable") {
+		t.Errorf("error should include drained response body; got: %v", err)
 	}
 }

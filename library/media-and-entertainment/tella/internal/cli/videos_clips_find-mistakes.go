@@ -70,24 +70,11 @@ The cookie expires; refresh from DevTools → Application → Cookies → tella.
 			}
 			uc, err := newUnofficialClient(cfg.SessionCookie, flags.timeout)
 			if err != nil {
-				return apiErr(err)
+				return configErr(err)
 			}
-			// Official client for the apply step. Public /cut is Bearer-auth
-			// and additive with whatever other cuts already live on the clip.
-			oc, err := flags.newClient()
-			if err != nil {
-				return err
-			}
-			// Detect needs to run even in --dry-run so we can show the user
-			// what the AI flagged. Apply is gated on flags.dryRun below.
-			oc.DryRun = false
-
-			mistakes, status, err := analyzeMistakes(uc, videoID, clipID)
+			mistakes, unknownEvents, status, err := analyzeMistakes(uc, videoID, clipID)
 			if err != nil {
 				return apiErr(err)
-			}
-			if status < 200 || status >= 300 {
-				return apiErr(fmt.Errorf("analyze-scene returned HTTP %d", status))
 			}
 
 			type plannedCut struct {
@@ -115,6 +102,7 @@ The cookie expires; refresh from DevTools → Application → Cookies → tella.
 				"video_id":          videoID,
 				"clip_id":           clipID,
 				"detected_mistakes": len(mistakes),
+				"unknown_events":    unknownEvents,
 				"planned":           planned,
 				"analyze_status":    status,
 			}
@@ -124,6 +112,13 @@ The cookie expires; refresh from DevTools → Application → Cookies → tella.
 				result["detect_only"] = detectOnly
 				result["applied"] = false
 				return printJSONFiltered(cmd.OutOrStdout(), result, flags)
+			}
+
+			// Official client for the apply step. Public /cut is Bearer-auth
+			// and additive with whatever other cuts already live on the clip.
+			oc, err := flags.newClient()
+			if err != nil {
+				return err
 			}
 
 			type appliedCut struct {
@@ -162,23 +157,27 @@ The cookie expires; refresh from DevTools → Application → Cookies → tella.
 }
 
 // analyzeMistakes POSTs to analyze-scene and parses the SSE stream.
-// Returns the detected mistakes (in stream order) plus the HTTP status.
+// Returns the detected mistakes (in stream order), unknown event count, and HTTP status.
 // Kept as a free function so it can be exercised by tests without going
 // through the full cobra runner.
-func analyzeMistakes(uc *unofficialClient, videoID, clipID string) (mistakes []detectedMistake, status int, err error) {
-	url := fmt.Sprintf("%s/ai-mistakes/analyze-scene", unofficialAIHost)
+func analyzeMistakes(uc *unofficialClient, videoID, clipID string) (mistakes []detectedMistake, unknownEvents int, status int, err error) {
+	baseURL := uc.aiBaseURL
+	if baseURL == "" {
+		baseURL = unofficialAIHost
+	}
+	url := fmt.Sprintf("%s/ai-mistakes/analyze-scene", baseURL)
 	body := map[string]any{
 		"storyID": videoID,
 		"sceneID": clipID,
 	}
 	stream, status, err := uc.postSSE(url, body)
 	if err != nil {
-		return nil, status, err
+		return nil, 0, status, err
 	}
 	defer stream.Close()
-	mistakes, _, parseErr := parseMistakesSSE(stream)
+	mistakes, unknownEvents, parseErr := parseMistakesSSE(stream)
 	if parseErr != nil {
-		return mistakes, status, parseErr
+		return mistakes, unknownEvents, status, parseErr
 	}
-	return mistakes, status, nil
+	return mistakes, unknownEvents, status, nil
 }

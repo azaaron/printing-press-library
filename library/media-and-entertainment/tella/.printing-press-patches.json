@@ -53,6 +53,7 @@
         "internal/cli/which.go",
         "internal/mcp/tools.go",
         "internal/config/config.go",
+        "internal/config/config_test.go",
         "SKILL.md",
         "README.md"
       ],

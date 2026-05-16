@@ -37,9 +37,9 @@ const (
 // The unofficial hosts are off-spec, may rate-limit differently, and use
 // cookie auth.
 type unofficialClient struct {
-	http    *http.Client
-	cookie  string
-	timeout time.Duration
+	http      *http.Client
+	cookie    string
+	aiBaseURL string
 }
 
 // newUnofficialClient builds a session-cookie-authenticated client. It
@@ -53,13 +53,14 @@ func newUnofficialClient(sessionCookie string, timeout time.Duration) (*unoffici
 			"`Cookie:` header value. This auth is fragile (session expires, may break on Tella deploys); " +
 			"the public-API Bearer token does NOT work against the unofficial AI service")
 	}
-	if timeout <= 0 {
-		timeout = 60 * time.Second // analyze-scene SSE streams can run for tens of seconds
+	const minSSETimeout = 60 * time.Second // analyze-scene SSE streams can run for tens of seconds
+	if timeout < minSSETimeout {
+		timeout = minSSETimeout
 	}
 	return &unofficialClient{
-		http:    &http.Client{Timeout: timeout},
-		cookie:  sessionCookie,
-		timeout: timeout,
+		http:      &http.Client{Timeout: timeout},
+		cookie:    sessionCookie,
+		aiBaseURL: unofficialAIHost,
 	}, nil
 }
 
@@ -98,35 +99,13 @@ func (u *unofficialClient) postSSE(url string, body any) (io.ReadCloser, int, er
 	if err != nil {
 		return nil, 0, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		// Drain + close so the caller doesn't need to handle 401 body.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		drained, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, resp.StatusCode, fmt.Errorf("unofficial API returned 401 — session cookie expired or invalid. Refresh by opening tella.tv in a browser and copying a new Cookie value into TELLA_SESSION_COOKIE. Body: %s", truncate(string(drained), 200))
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, resp.StatusCode, fmt.Errorf("unofficial API returned 401 — session cookie expired or invalid. Refresh by opening tella.tv in a browser and copying a new Cookie value into TELLA_SESSION_COOKIE. Body: %s", truncate(string(drained), 200))
+		}
+		return nil, resp.StatusCode, fmt.Errorf("unofficial API returned HTTP %d. Body: %s", resp.StatusCode, truncate(string(drained), 200))
 	}
 	return resp.Body, resp.StatusCode, nil
-}
-
-// patchJSON makes a PATCH and returns the response body. Used by
-// find-mistakes to apply the cuts surfaced by analyze-scene to the scene.
-func (u *unofficialClient) patchJSON(url string, body any) ([]byte, int, error) {
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, 0, fmt.Errorf("marshaling unofficial PATCH body: %w", err)
-	}
-	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(buf))
-	if err != nil {
-		return nil, 0, err
-	}
-	u.setStandardHeaders(req, "application/json")
-	resp, err := u.http.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-	out, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, resp.StatusCode, fmt.Errorf("unofficial API returned 401 — session cookie expired or invalid. Refresh from a browser. Body: %s", truncate(string(out), 200))
-	}
-	return out, resp.StatusCode, nil
 }

@@ -3,8 +3,11 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +16,90 @@ import (
 // shape (verified 2026-05-16), the pickBufferRanges tolerance rules, and
 // fetchClipDurationMs. Cataloged in
 // .printing-press-patches.json#add-cut-panel-parity.
+
+func TestClipsEditPassRejectsNegativeBufferMinMs(t *testing.T) {
+	flags := &rootFlags{dryRun: true}
+	cmd := newClipsEditPassCmd(flags)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--playlist", "plst_123", "--remove-buffers", "--buffer-min-ms=-1"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for negative --buffer-min-ms, got nil")
+	}
+	if ExitCode(err) != 2 {
+		t.Fatalf("ExitCode = %d, want 2 (usage error)", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "--buffer-min-ms must be >= 0") {
+		t.Fatalf("error = %q, want --buffer-min-ms validation message", err.Error())
+	}
+}
+
+func TestClipsEditPassDryRunStillRequiresUnofficialForFindMistakes(t *testing.T) {
+	flags := &rootFlags{dryRun: true}
+	cmd := newClipsEditPassCmd(flags)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--playlist", "plst_123", "--find-mistakes"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for --find-mistakes without --unofficial, got nil")
+	}
+	if ExitCode(err) != 2 {
+		t.Fatalf("ExitCode = %d, want 2 (usage error)", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "pass --unofficial") {
+		t.Fatalf("error = %q, want --unofficial validation message", err.Error())
+	}
+}
+
+func TestClipsEditPassDryRunFindMistakesRequiresSessionCookie(t *testing.T) {
+	t.Setenv("TELLA_SESSION_COOKIE", "")
+	flags := &rootFlags{
+		dryRun:     true,
+		configPath: filepath.Join(t.TempDir(), "config.toml"),
+	}
+	cmd := newClipsEditPassCmd(flags)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--playlist", "plst_123", "--find-mistakes", "--unofficial"})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for missing TELLA_SESSION_COOKIE in dry-run, got nil")
+	}
+	if ExitCode(err) != 10 {
+		t.Fatalf("ExitCode = %d, want 10 (config error)", ExitCode(err))
+	}
+	if !strings.Contains(err.Error(), "TELLA_SESSION_COOKIE") {
+		t.Fatalf("error = %q, want TELLA_SESSION_COOKIE validation message", err.Error())
+	}
+}
+
+func TestClipsEditPassDryRunIncludesTotalClips(t *testing.T) {
+	flags := &rootFlags{dryRun: true}
+	cmd := newClipsEditPassCmd(flags)
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--playlist", "plst_123", "--remove-buffers"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal output %q: %v", out.String(), err)
+	}
+	if got := result["total_clips"]; got != float64(0) {
+		t.Fatalf("total_clips = %v, want 0", got)
+	}
+}
 
 func TestExtractSilenceRanges_LiveDurationShape(t *testing.T) {
 	// Real-shape sample drawn from the live API on 2026-05-16. The legacy
@@ -27,8 +114,8 @@ func TestExtractSilenceRanges_LiveDurationShape(t *testing.T) {
     }`)
 	got := extractSilenceRanges(data)
 	// intField truncates each float field with int(x) before summing, so
-	// end = trunc(start) + trunc(duration) — up to 1ms below the true
-	// rounded end. Acceptable: under-cutting by 1ms is preferable to
+	// end = trunc(start) + trunc(duration) — up to 2ms below the true
+	// rounded end. Acceptable: under-cutting by 2ms is preferable to
 	// over-cutting, and the precision drift is below human perception.
 	want := []silenceRange{
 		{Start: 0, End: 737},
@@ -62,6 +149,14 @@ func TestExtractSilenceRanges_LegacyExplicitEndShape(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("range[%d] = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+func TestExtractSilenceRanges_ExplicitZeroEndDoesNotFallBackToDuration(t *testing.T) {
+	data := json.RawMessage(`{"silences": [{"startTimeMs": 100, "endMs": 0, "durationMs": 250}]}`)
+	got := extractSilenceRanges(data)
+	if len(got) != 0 {
+		t.Fatalf("got %+v, want no ranges because explicit endMs=0 is not a valid end", got)
 	}
 }
 
@@ -143,6 +238,17 @@ func TestPickBufferRanges_ZeroClipDuration(t *testing.T) {
 	}
 	if tail != nil {
 		t.Errorf("expected no tail when clipMs is 0, got %+v", tail)
+	}
+}
+
+func TestPickBufferRanges_DoesNotReturnSameRangeAsHeadAndTail(t *testing.T) {
+	ranges := []silenceRange{{Start: 0, End: 950}}
+	head, tail := pickBufferRanges(ranges, 1000)
+	if head == nil || *head != (silenceRange{Start: 0, End: 950}) {
+		t.Fatalf("head = %v, want {0, 950}", head)
+	}
+	if tail != nil {
+		t.Fatalf("tail = %v, want nil to avoid duplicate /cut for the same range", tail)
 	}
 }
 

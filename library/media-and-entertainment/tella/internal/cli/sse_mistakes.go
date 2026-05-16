@@ -20,10 +20,12 @@ import (
 // detectedMistake mirrors the per-mistake object Tella's AI service emits.
 // Field names are camelCase to match the wire format verbatim, simplifying
 // debugging when an envelope is logged.
+// Trim.StartTime and Trim.Duration are milliseconds, not seconds; apply
+// paths use them directly as fromMs/toMs values.
 type detectedMistake struct {
 	Trim struct {
-		StartTime float64 `json:"startTime"`
-		Duration  float64 `json:"duration"`
+		StartTime float64 `json:"startTime"` // milliseconds
+		Duration  float64 `json:"duration"`  // milliseconds
 	} `json:"trim"`
 	Reasoning  string  `json:"reasoning"`
 	WordsToCut string  `json:"wordsToCut"`
@@ -63,54 +65,38 @@ func parseMistakesSSE(body io.Reader) ([]detectedMistake, int, error) {
 		if payload == "" {
 			continue
 		}
-		var tuple [2]json.RawMessage
+		var tuple []json.RawMessage
 		if err := json.Unmarshal([]byte(payload), &tuple); err != nil {
-			// Some SSE servers send the event type as a separate line
-			// (`event: name\ndata: payload`); fall back to parsing the
-			// data line as a bare mistakes array if it isn't a 2-tuple.
-			var direct []detectedMistake
-			if derr := json.Unmarshal([]byte(payload), &direct); derr == nil {
-				out = append(out, direct...)
+			unknownEvents++
+			continue
+		}
+		if len(tuple) == 2 {
+			var eventType string
+			if err := json.Unmarshal(tuple[0], &eventType); err == nil {
+				if eventType != "Mistakes" {
+					unknownEvents++
+					continue
+				}
+				var batch []detectedMistake
+				if err := json.Unmarshal(tuple[1], &batch); err != nil {
+					unknownEvents++
+					continue
+				}
+				out = append(out, batch...)
 				continue
 			}
+		}
+		// Some SSE servers send the event type as a separate `event:` line
+		// and put only the payload array in `data:`.
+		var direct []detectedMistake
+		if err := json.Unmarshal([]byte(payload), &direct); err != nil {
 			unknownEvents++
 			continue
 		}
-		var eventType string
-		if err := json.Unmarshal(tuple[0], &eventType); err != nil {
-			unknownEvents++
-			continue
-		}
-		if eventType != "Mistakes" {
-			unknownEvents++
-			continue
-		}
-		var batch []detectedMistake
-		if err := json.Unmarshal(tuple[1], &batch); err != nil {
-			return out, unknownEvents, fmt.Errorf("decoding mistakes batch: %w (line: %s)", err, truncate(payload, 200))
-		}
-		out = append(out, batch...)
+		out = append(out, direct...)
 	}
 	if err := scanner.Err(); err != nil {
 		return out, unknownEvents, fmt.Errorf("reading SSE stream: %w", err)
 	}
 	return out, unknownEvents, nil
-}
-
-// mistakesToCuts maps detected mistakes into the `{startTime, duration}`
-// shape the web UI's apply-PATCH expects on www.tella.tv. The unofficial
-// PATCH endpoint uses startTime+duration, NOT fromMs+toMs like the public
-// /cut endpoint, so this helper keeps the shape mapping in one place.
-func mistakesToCuts(mistakes []detectedMistake) []map[string]any {
-	out := make([]map[string]any, 0, len(mistakes))
-	for _, m := range mistakes {
-		if m.Trim.Duration <= 0 {
-			continue
-		}
-		out = append(out, map[string]any{
-			"startTime": m.Trim.StartTime,
-			"duration":  m.Trim.Duration,
-		})
-	}
-	return out
 }

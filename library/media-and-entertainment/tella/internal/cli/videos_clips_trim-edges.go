@@ -177,5 +177,8 @@ func pickBufferRanges(ranges []silenceRange, clipDurationMs int) (head *silenceR
 			tail = &t
 		}
 	}
+	if head != nil && tail != nil && *head == *tail {
+		tail = nil
+	}
 	return head, tail
 }
