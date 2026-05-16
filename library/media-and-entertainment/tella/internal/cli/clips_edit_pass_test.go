@@ -8,6 +8,181 @@ import (
 	"testing"
 )
 
+// PATCH(library): tests added alongside the Cut-panel parity work. Pin the
+// extractSilenceRanges fix against the live {startTimeMs, durationMs}
+// shape (verified 2026-05-16), the pickBufferRanges tolerance rules, and
+// fetchClipDurationMs. Cataloged in
+// .printing-press-patches.json#add-cut-panel-parity.
+
+func TestExtractSilenceRanges_LiveDurationShape(t *testing.T) {
+	// Real-shape sample drawn from the live API on 2026-05-16. The legacy
+	// extractSilenceRanges returned an empty slice against this shape
+	// (looked for `end`/`endMs`, the response carries `durationMs`).
+	data := json.RawMessage(`{
+        "silences": [
+            {"startTimeMs": 0, "durationMs": 737.2335600907029},
+            {"startTimeMs": 766.2585034013605, "durationMs": 1387.3922902494328},
+            {"startTimeMs": 2165.260770975057, "durationMs": 1607.9818594104308}
+        ]
+    }`)
+	got := extractSilenceRanges(data)
+	// intField truncates each float field with int(x) before summing, so
+	// end = trunc(start) + trunc(duration) — up to 1ms below the true
+	// rounded end. Acceptable: under-cutting by 1ms is preferable to
+	// over-cutting, and the precision drift is below human perception.
+	want := []silenceRange{
+		{Start: 0, End: 737},
+		{Start: 766, End: 2153},
+		{Start: 2165, End: 3772},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("extractSilenceRanges returned %d ranges, want %d (got=%+v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("range[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExtractSilenceRanges_LegacyExplicitEndShape(t *testing.T) {
+	// Backwards-compat: older responses (or alt encodings) carried
+	// explicit `end`/`endMs` instead of `durationMs`. The fixed parser
+	// still handles both — verify the legacy shape isn't a regression.
+	data := json.RawMessage(`{"silences": [{"start": 100, "end": 600}, {"startMs": 1000, "endMs": 1500}]}`)
+	got := extractSilenceRanges(data)
+	want := []silenceRange{
+		{Start: 100, End: 600},
+		{Start: 1000, End: 1500},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d ranges, want %d (got=%+v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("range[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExtractSilenceRanges_BareArrayWithDuration(t *testing.T) {
+	data := json.RawMessage(`[{"startTimeMs": 100, "durationMs": 250}]`)
+	got := extractSilenceRanges(data)
+	if len(got) != 1 || got[0] != (silenceRange{Start: 100, End: 350}) {
+		t.Fatalf("got %+v, want [{100, 350}]", got)
+	}
+}
+
+func TestExtractSilenceRanges_SkipsNonPositiveDuration(t *testing.T) {
+	data := json.RawMessage(`{"silences": [{"startTimeMs": 0, "durationMs": 0}, {"startTimeMs": 10, "durationMs": -5}]}`)
+	got := extractSilenceRanges(data)
+	if len(got) != 0 {
+		t.Fatalf("expected zero ranges for non-positive durations, got %+v", got)
+	}
+}
+
+func TestPickBufferRanges_HeadAndTail(t *testing.T) {
+	clipMs := 200_000
+	ranges := []silenceRange{
+		{Start: 0, End: 800},
+		{Start: 50_000, End: 50_800},
+		{Start: 199_500, End: 199_950},
+	}
+	head, tail := pickBufferRanges(ranges, clipMs)
+	if head == nil || *head != (silenceRange{Start: 0, End: 800}) {
+		t.Errorf("head = %v, want {0, 800}", head)
+	}
+	if tail == nil || *tail != (silenceRange{Start: 199_500, End: 199_950}) {
+		t.Errorf("tail = %v, want {199500, 199950}", tail)
+	}
+}
+
+func TestPickBufferRanges_HeadOnly_TailMidClip(t *testing.T) {
+	clipMs := 200_000
+	ranges := []silenceRange{
+		{Start: 0, End: 500},
+		{Start: 150_000, End: 150_400},
+	}
+	head, tail := pickBufferRanges(ranges, clipMs)
+	if head == nil {
+		t.Error("expected a head range, got nil")
+	}
+	if tail != nil {
+		t.Errorf("expected no tail range (mid-clip silence shouldn't qualify), got %+v", tail)
+	}
+}
+
+func TestPickBufferRanges_TailOnly_NoHeadSilence(t *testing.T) {
+	clipMs := 100_000
+	ranges := []silenceRange{
+		{Start: 5_000, End: 5_300},
+		{Start: 99_950, End: 100_000},
+	}
+	head, tail := pickBufferRanges(ranges, clipMs)
+	if head != nil {
+		t.Errorf("expected no head (first silence at 5000ms is past head tolerance), got %+v", head)
+	}
+	if tail == nil || *tail != (silenceRange{Start: 99_950, End: 100_000}) {
+		t.Errorf("tail = %v, want {99950, 100000}", tail)
+	}
+}
+
+func TestPickBufferRanges_NoQualifyingSilences(t *testing.T) {
+	ranges := []silenceRange{{Start: 20_000, End: 21_000}}
+	head, tail := pickBufferRanges(ranges, 200_000)
+	if head != nil || tail != nil {
+		t.Errorf("expected no head or tail, got head=%v tail=%v", head, tail)
+	}
+}
+
+func TestPickBufferRanges_ZeroClipDuration(t *testing.T) {
+	ranges := []silenceRange{{Start: 0, End: 600}}
+	head, tail := pickBufferRanges(ranges, 0)
+	if head == nil || head.Start != 0 || head.End != 600 {
+		t.Errorf("expected head {0, 600} even with zero clipMs, got %+v", head)
+	}
+	if tail != nil {
+		t.Errorf("expected no tail when clipMs is 0, got %+v", tail)
+	}
+}
+
+// stubGetter satisfies clipDurationGetter for fetchClipDurationMs tests.
+type stubGetter struct {
+	data json.RawMessage
+	err  error
+}
+
+func (s *stubGetter) Get(_ string, _ map[string]string) (json.RawMessage, error) {
+	return s.data, s.err
+}
+
+func TestFetchClipDurationMs_HappyPath(t *testing.T) {
+	s := &stubGetter{data: json.RawMessage(`{"clip":{"id":"cl_abc","durationSeconds":235.167}}`)}
+	got, err := fetchClipDurationMs(s, "vid", "cl")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 235167 {
+		t.Errorf("got %d ms, want 235167", got)
+	}
+}
+
+func TestFetchClipDurationMs_RejectsNonPositiveDuration(t *testing.T) {
+	s := &stubGetter{data: json.RawMessage(`{"clip":{"durationSeconds":0}}`)}
+	_, err := fetchClipDurationMs(s, "vid", "cl")
+	if err == nil {
+		t.Fatal("expected error for zero durationSeconds, got nil")
+	}
+}
+
+func TestFetchClipDurationMs_ParseError(t *testing.T) {
+	s := &stubGetter{data: json.RawMessage(`not json at all`)}
+	_, err := fetchClipDurationMs(s, "vid", "cl")
+	if err == nil {
+		t.Fatal("expected parse error, got nil")
+	}
+}
+
 // stubPagedGetter returns a scripted sequence of envelope responses on
 // successive c.Get calls. Pages are indexed by cursor; the first call has no
 // cursor query param and returns the page at "".

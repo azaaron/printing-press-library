@@ -25,6 +25,13 @@ type Config struct {
 	ClientSecret  string            `toml:"client_secret"`
 	Path          string            `toml:"-"`
 	TellaApiKey   string            `toml:"api_key"`
+	// PATCH(library): SessionCookie holds the raw `Cookie:` header value
+	// the user copies from a browser DevTools session on tella.tv. Used
+	// only by --unofficial commands (find-mistakes today) that hit
+	// www.tella.tv or prod-stream.tella.tv — those hosts require
+	// session-cookie auth and reject the public-API Bearer token (401).
+	// Cataloged in .printing-press-patches.json#add-cut-panel-parity.
+	SessionCookie string `toml:"session_cookie"`
 }
 
 func Load(configPath string) (*Config, error) {
@@ -55,6 +62,14 @@ func Load(configPath string) (*Config, error) {
 	if v := os.Getenv("TELLA_API_KEY"); v != "" {
 		cfg.TellaApiKey = v
 		cfg.AuthSource = "env:TELLA_API_KEY"
+	}
+	// PATCH(library): TELLA_SESSION_COOKIE overrides any config-file
+	// session_cookie. Expected value is the raw `Cookie:` header content
+	// (everything after the leading "Cookie: ") copied from browser
+	// DevTools on tella.tv. The CLI never persists this to disk unless
+	// the user writes it to config explicitly.
+	if v := os.Getenv("TELLA_SESSION_COOKIE"); v != "" {
+		cfg.SessionCookie = strings.TrimSpace(strings.TrimPrefix(v, "Cookie:"))
 	}
 
 	// Label config-file-derived credentials so doctor can distinguish
