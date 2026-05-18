@@ -32,7 +32,7 @@ func resolveMeshUserID(flags *rootFlags) (int, error) {
 		return 0, fmt.Errorf("missing _fbuid cookie; run `ordertogo-pp-cli auth login --chrome` after signing in at ordertogo.com")
 	}
 	fbphone, _ := config.CookieValueFromStore("", "_fbphone")
-	if decoded, err := url.QueryUnescape(fbphone); err == nil {
+	if decoded, err := url.PathUnescape(fbphone); err == nil {
 		fbphone = decoded
 	}
 	fbphone = strings.TrimPrefix(fbphone, "+1")
