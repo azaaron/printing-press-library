@@ -5,6 +5,15 @@
   "base_printing_press_version": "4.2.2",
   "patches": [
     {
+      "id": "requestid-hoist-above-retry-loop",
+      "summary": "Hoist the __requestid generation above the retry loop in client.go so all retries for the same logical request share the same idempotency token.",
+      "reason": "Greptile P1 on PR #471: __requestid was generated inline inside the retry loop, so each retry attempt got a different epoch_ms+random token. The server treats __requestid as the idempotency key, so distinct values across retries make the second + third attempts look like fresh requests instead of replays — exactly what idempotency is meant to prevent. Generating the id once before `for attempt := 0; attempt <= maxRetries; attempt++` and reusing it on every retry restores the intended semantics. GET requests still skip the header (requestID stays empty for GETs).",
+      "files": [
+        "internal/client/client.go"
+      ],
+      "validated_outcome": "Build / vet / 92 tests / verify-skill all clean after the change."
+    },
+    {
       "id": "ordertogo-agent-ordering",
       "summary": "Added Chrome cookie import, local order history, cart planning, checkout, analytics, config defaults, and agent-context enrichment.",
       "reason": "The generated OrderToGo CLI needed the requested agent-safe ordering workflow without re-running the Printing Press generator.",

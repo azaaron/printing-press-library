@@ -212,6 +212,15 @@ func (c *Client) do(method, path string, params map[string]string, body any, hea
 	const maxRetries = 3
 	var lastErr error
 
+	// PATCH: hoist the __requestid above the retry loop so all retries
+	// for the same logical request share the same idempotency token.
+	// Generating it inline would assign a new id on each retry, defeating
+	// the server-side idempotency check (greptile P1 on PR #471).
+	requestID := ""
+	if method != http.MethodGet {
+		requestID = fmt.Sprintf("%d_%d", time.Now().UnixMilli(), randInt())
+	}
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		// Proactive rate limiting — wait before sending
 		c.limiter.Wait()
@@ -272,10 +281,12 @@ func (c *Client) do(method, path string, params map[string]string, body any, hea
 				req.Header.Set("Authorization", fbtoken)
 			}
 		}
-		// PATCH: ordertogo.com uses an `__requestid` header for idempotency on
-		// POSTs (epoch_ms + random int). Format: <epoch_ms>_<random>.
-		if method != http.MethodGet && req.Header.Get("__requestid") == "" {
-			req.Header.Set("__requestid", fmt.Sprintf("%d_%d", time.Now().UnixMilli(), randInt()))
+		// PATCH: ordertogo.com uses an `__requestid` header for idempotency
+		// on POSTs (epoch_ms + random int). Format: <epoch_ms>_<random>.
+		// requestID is hoisted above the retry loop so all attempts share
+		// the same token (greptile P1 on PR #471).
+		if requestID != "" && req.Header.Get("__requestid") == "" {
+			req.Header.Set("__requestid", requestID)
 		}
 
 		resp, err := c.HTTPClient.Do(req)
