@@ -157,40 +157,86 @@ Outside this PR:
 
 ---
 
+### U5. Chain `SETLISTFM_API_KEY` into `auth logout` env-still-set check
+
+**Goal:** When `auth logout` clears the config, surface a note for whichever env var is still exported so the user understands they remain authenticated via env. The current code only checks `SETLIST_FM_API_KEY`, but `config.Load` accepts `SETLISTFM_API_KEY` with higher priority — a user on the modern setlistfm-js convention sees "Logged out. Credentials cleared." while staying fully authenticated.
+
+**Requirements:** Closes Greptile P1 finding on PR #731 (`auth.go:120-139`). The logout verdict must mirror `config.Load`'s env-var priority.
+
+**Dependencies:** None on other units (the existing `auth.go` block already telegraphs the chain shape with its redundant `if envStillSet == ""` guard).
+
+**Files:**
+- `library/media-and-entertainment/setlist-fm/internal/cli/auth.go` (modify)
+- `library/media-and-entertainment/setlist-fm/internal/cli/auth_test.go` (create or extend)
+
+**Approach:**
+- Extend the env-still-set chain in `newAuthLogoutCmd` to check `SETLISTFM_API_KEY` first (matching `config.Load`'s priority order at `internal/config/config.go:58-63`), then `SETLIST_FM_API_KEY`. The first non-empty wins.
+- Keep the human prose and the JSON `note` field shape the same — only the detected var name changes.
+- No change to `ClearAPIKey` itself; this is purely about surfacing env-survival accurately.
+
+**Patterns to follow:** The existing chain skeleton in `auth.go:121-124`. Keep the `if envStillSet == ""` short-circuit pattern so future env-var additions remain easy.
+
+**Test scenarios:**
+- Logout with only `SETLISTFM_API_KEY` exported: JSON envelope contains `note: "SETLISTFM_API_KEY env var is still set"`; human prose names `SETLISTFM_API_KEY`.
+- Logout with only `SETLIST_FM_API_KEY` exported: JSON envelope contains `note: "SETLIST_FM_API_KEY env var is still set"`; human prose names `SETLIST_FM_API_KEY` (regression coverage for the pre-fix behavior).
+- Logout with both env vars exported: JSON envelope names `SETLISTFM_API_KEY` (the higher-priority var, matching what `config.Load` would have used).
+- Logout with neither env var exported: JSON envelope has no `note` key; human prose is `Logged out. Credentials cleared.`
+
+**Verification:** `go test ./internal/cli/...` passes. Manual smoke: `export SETLISTFM_API_KEY=test && setlist-fm-pp-cli auth logout` prints a line naming `SETLISTFM_API_KEY`.
+
+---
+
+### U6. Route `doctor_test.go` through an in-process `httptest.NewServer`
+
+**Goal:** Stop `runDoctor` from issuing live HTTP calls against `https://api.setlist.fm/rest` on every CI run. The doctor command unconditionally hits `Get("/")` and an authenticated probe; tests pass a config with the real base URL and ignore the resulting `api`/`credentials` keys, so the network round-trip is invisible-on-success but slow and DNS-fragile.
+
+**Requirements:** Closes Greptile P2 finding on PR #731 (`doctor_test.go:386-402`).
+
+**Dependencies:** None on other units. Pattern is already established in this CLI's test suite.
+
+**Files:**
+- `library/media-and-entertainment/setlist-fm/internal/cli/doctor_test.go` (modify)
+
+**Approach:**
+- Add a helper (e.g. `writeConfigWithStubAPI`) that spins up an `httptest.NewServer` returning a minimal JSON body for `/` and the doctor's authenticated probe path, registers `t.Cleanup(srv.Close)`, and writes a `config.toml` whose `base_url` points at `srv.URL`.
+- Update each `writeConfig` call site in this file to use the stub-backed helper (or replace `writeConfig` outright if no callsite needs the real-URL form).
+- Leave the existing test assertions untouched — they only inspect `env_vars`, `auth_hint`, and the rendered prose, none of which depend on the network outcome.
+- Optional small upside: with a stub server in place, future tests can begin asserting on `api`/`credentials` keys, but no new assertions in this unit.
+
+**Patterns to follow:** `internal/cli/sync_hydrate_test.go:19-50` (httptest server + `BaseURL: srv.URL` + `defer srv.Close()`) and `internal/cliutil/cliutil_test.go:449-620` (same shape, multiple handlers).
+
+**Test scenarios:**
+- All five existing doctor tests (`TestDoctorEnvVarsOKWhenConfigProvidesAuth`, `TestDoctorEnvVarsFailWhenNoAuthAnywhere`, `TestDoctorEnvVarsOKWhenEnvVarSet`, `TestDoctorHintMentionsFreeAndAuthSetTokenAndEnvVar`, `TestDoctorHintOmittedWhenAuthConfigured`, `TestDoctorHumanRenderingShowsHintAcrossMultipleLines`) continue to pass with no behavioral change.
+- New negative coverage (worth adding while the helper exists): a test that confirms `api` reports `reachable` and `credentials` reports a non-empty verdict when the stub server returns 200 — proves the stub is actually wired in, otherwise a typo in `base_url` would still pass the existing assertion set.
+
+**Verification:** `go test ./internal/cli/...` passes with `-count=1` and with the network disabled (`GODEBUG=netdns=go+1 go test -tags nointernet ./internal/cli/...` would surface DNS attempts; alternatively, run the suite on an airplane-mode laptop or in `--network=none` docker). The doctor tests must run in under a second total — current behavior depends on api.setlist.fm latency.
+
+---
+
 ### U4. Record the patch in `.printing-press-patches.json`
 
-**Goal:** Append a patch entry so the Printing Press tooling re-applies these fixes after future regenerations. Mirrors the existing `greptile-review-feedback` entry.
+**Goal:** Extend the existing `auth-flow-fix` patch entry so the Printing Press tooling re-applies all of U1-U3 plus the U5/U6 Greptile follow-ups after future regenerations.
 
-**Dependencies:** U1, U2, U3 (the entry's `files` list must match the actual changed paths).
+**Dependencies:** U1, U2, U3, U5, U6 (the entry's `files`, `summary`, and `reason` must reflect the final changed paths and motivations).
 
 **Files:**
 - `library/media-and-entertainment/setlist-fm/.printing-press-patches.json` (modify)
 
 **Approach:**
-- Append a new object to the `patches` array:
-  ```json
-  {
-    "id": "auth-flow-fix",
-    "summary": "Re-route auth set-token to fm_api_key, drop dead OAuth fields, and fix doctor env-vars verdict.",
-    "reason": "Generated CLI emitted an OAuth-shaped config but Setlist.fm uses only the static x-api-key header, so auth set-token wrote to a dead field and doctor falsely reported FAIL Env Vars when config-based auth was valid.",
-    "files": [
-      "internal/cli/auth.go",
-      "internal/cli/doctor.go",
-      "internal/cli/doctor_test.go",
-      "internal/config/config.go",
-      "internal/config/config_test.go"
-    ],
-    "validated_outcome": "go test ./... passed; manual smoke confirmed auth set-token persists to fm_api_key and doctor no longer reports FAIL Env Vars when config provides auth."
-  }
-  ```
+- Update the existing `auth-flow-fix` patch object (do not add a second entry — the Greptile findings are a review-cycle followup on the same shipped fix, not a separate customization):
+  - Extend `summary` to mention the env-var-priority chain in logout and the httptest-stubbed doctor tests.
+  - Extend `reason` with a sentence about the Greptile follow-ups (PR #731 review): logout `env_still_set` chain matched to `config.Load` priority; doctor tests no longer round-trip the live API.
+  - Add `internal/cli/auth_test.go` to `files` (created in U5 if not already present).
+  - `internal/cli/auth.go`, `internal/cli/doctor.go`, `internal/cli/doctor_test.go`, `internal/config/config.go`, `internal/config/config_test.go` are already in the list — no change there.
+  - Extend `validated_outcome` to note the new test coverage (auth logout env-var matrix + doctor tests run with no network).
 - Leave `schema_version`, `applied_at`, `base_run_id`, `base_printing_press_version` unchanged — those describe the base generation, not this patch.
 
-**Patterns to follow:** Existing `greptile-review-feedback` entry shape.
+**Patterns to follow:** Existing `greptile-review-feedback` entry shape; the live `auth-flow-fix` entry as written today.
 
 **Test scenarios:**
-- Test expectation: none -- pure metadata file, validated by the actual code changes in U1-U3 and by Printing Press tooling later re-applying patches.
+- Test expectation: none -- pure metadata file, validated by the actual code changes in U1-U3 and U5-U6 plus the patches manifest parsing as JSON.
 
-**Verification:** File parses as JSON (`jq . .printing-press-patches.json`). `patches` array has two entries.
+**Verification:** File parses as JSON (`jq . .printing-press-patches.json`). `patches` array still has two entries (the original `greptile-review-feedback` plus the now-extended `auth-flow-fix`). `internal/cli/auth_test.go` appears in the `auth-flow-fix` `files` array.
 
 ---
 
@@ -233,3 +279,12 @@ Outside this PR:
    - References PR #724 as the contribution that shipped the affected CLI.
    - Lists the verification steps that were run.
    - No process narrative, no AI-tool disclosure beyond the standard footer (per global feedback).
+
+### Follow-up commit for U5/U6 (Greptile review feedback on PR #731)
+
+7. On the same `fix/setlist-fm-auth-flow` branch already pushed at step 5, apply U5 (auth.go env-still-set chain + auth_test.go) and U6 (doctor_test.go httptest stub).
+8. Re-extend U4 in `.printing-press-patches.json` per its current Approach.
+9. Run `go test ./...`, `go vet ./...`, `go build ./...` from the CLI root.
+10. Commit with: `fix(setlist-fm): chain SETLISTFM_API_KEY in logout and stub doctor tests` (matches the conventional-commit scope used at step 4).
+11. `git push origin fix/setlist-fm-auth-flow` — Greptile re-reviews automatically on push.
+12. Reply to each of the two PR-731 review threads with a one-line resolution pointer to the commit, then mark resolved. Do not merge until Greptile re-reviews and any new findings clear.

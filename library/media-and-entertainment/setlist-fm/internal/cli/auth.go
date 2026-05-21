@@ -117,8 +117,14 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
 			}
 
 			// Identify which (if any) auth env var is still exported so the
-			// JSON envelope and the human prose can both surface it.
+			// JSON envelope and the human prose can both surface it. Check in
+			// the same priority order as config.Load: SETLISTFM_API_KEY
+			// (setlistfm-js convention) wins over SETLIST_FM_API_KEY
+			// (setlist-fm-client convention) when both are set.
 			envStillSet := ""
+			if envStillSet == "" && os.Getenv("SETLISTFM_API_KEY") != "" {
+				envStillSet = "SETLISTFM_API_KEY"
+			}
 			if envStillSet == "" && os.Getenv("SETLIST_FM_API_KEY") != "" {
 				envStillSet = "SETLIST_FM_API_KEY"
 			}
