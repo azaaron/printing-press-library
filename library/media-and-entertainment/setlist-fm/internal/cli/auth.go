@@ -84,16 +84,7 @@ func newAuthSetTokenCmd(flags *rootFlags) *cobra.Command {
 				return configErr(err)
 			}
 
-			// Clear any legacy auth_header so AuthHeader() falls through to
-			// "Bearer " + AccessToken with the new token. Without this, a
-			// pre-existing auth_header value (common after regenerate) shadows
-			// the newly-saved access_token and set-token silently has no effect.
-			// Silent clear (no log line): a masked-tail variant could leak
-			// token bytes through scripted dogfood that captures stderr.
-			cfg.AuthHeaderVal = ""
-
-			// Save the token directly via the config's save mechanism
-			if err := cfg.SaveTokens("", "", args[0], "", cfg.TokenExpiry); err != nil {
+			if err := cfg.SaveAPIKey(args[0]); err != nil {
 				return configErr(fmt.Errorf("saving token: %w", err))
 			}
 
@@ -121,7 +112,7 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
 				return configErr(err)
 			}
 
-			if err := cfg.ClearTokens(); err != nil {
+			if err := cfg.ClearAPIKey(); err != nil {
 				return configErr(fmt.Errorf("clearing tokens: %w", err))
 			}
 

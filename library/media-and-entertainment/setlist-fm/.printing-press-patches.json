@@ -19,6 +19,20 @@
         "internal/store/upsert_batch_test.go"
       ],
       "validated_outcome": "go test ./... passed for the generated Setlist.fm module."
+    },
+    {
+      "id": "auth-flow-fix",
+      "summary": "Re-route auth set-token to fm_api_key, drop dead OAuth fields, and fix doctor env-vars verdict.",
+      "reason": "Generated CLI emitted an OAuth-shaped config (access_token / refresh_token / token_expiry / client_id / client_secret / auth_header) but Setlist.fm uses only the static x-api-key header. auth set-token wrote to a dead access_token field, every API call returned 403, and doctor falsely reported FAIL Env Vars when fm_api_key was set in config. Also adds 'free' language and the auth set-token command to the doctor hint.",
+      "files": [
+        "internal/cli/auth.go",
+        "internal/cli/doctor.go",
+        "internal/cli/doctor_test.go",
+        "internal/client/client.go",
+        "internal/config/config.go",
+        "internal/config/config_test.go"
+      ],
+      "validated_outcome": "go test ./... passed; manual smoke confirmed auth set-token persists to fm_api_key and doctor no longer reports FAIL Env Vars when config provides auth."
     }
   ]
 }
