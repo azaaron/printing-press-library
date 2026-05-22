@@ -28,6 +28,13 @@
       "summary": "Add 500ms sleep between per-gear GET /gear/{id} calls in gear status.",
       "reason": "Unbounded sequential API calls with no sleep could silently exhaust Strava's shared 200 req/15 min quota when a user has many gear items.",
       "files": ["internal/cli/gear_status.go"]
+    },
+    {
+      "id": "streams-generic-resources-table",
+      "summary": "Repoint power-curve and training-zones stream queries to resources table (resource_type='streams').",
+      "reason": "Both commands JOINed on the activities_streams typed table, which sync never populates. Individual stream fetches write to the generic resources table under resource_type='streams'. Repointed queries to resources JOIN on id. Added actionable error when no stream data is cached instead of silent all-zero output.",
+      "files": ["internal/cli/athletes_power_curve.go", "internal/cli/training_zones.go"],
+      "validated_outcome": "Commands now query the correct table and return an error with instructions (run 'activities streams get-activity <id>') when no streams are cached."
     }
   ]
 }

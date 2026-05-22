@@ -87,9 +87,13 @@ Streams must be present in the local database.`,
 				streamKey = "watts"
 			}
 
+			// Stream data is stored in the generic resources table under
+			// resource_type='streams' (written by "activities streams get-activity <id>"),
+			// NOT in activities_streams typed table (which sync never populates).
+			// Left-join on id: a streams row id equals the originating activity_id.
 			query := `SELECT r.data, s.data
 FROM resources r
-LEFT JOIN activities_streams s ON s.activities_id = r.id
+LEFT JOIN resources s ON s.id = r.id AND s.resource_type = 'streams'
 WHERE r.resource_type IN ('athlete-activities', 'activities')
 AND COALESCE(json_extract(r.data, '$.start_date'), '') >= ?`
 			qargs := []any{cutoff.Format("2006-01-02T15:04:05Z")}
@@ -149,6 +153,27 @@ AND COALESCE(json_extract(r.data, '$.start_date'), '') >= ?`
 			}
 			if err := rows.Err(); err != nil {
 				return fmt.Errorf("reading rows: %w", err)
+			}
+
+			// Detect all-zero output: activities found but no stream data cached.
+			// This means streams haven't been fetched for any activity yet.
+			streamsFound := false
+			for _, zones := range weekZones {
+				for _, m := range zones {
+					if m > 0 {
+						streamsFound = true
+						break
+					}
+				}
+				if streamsFound {
+					break
+				}
+			}
+			if len(weekOrder) > 0 && !streamsFound {
+				return fmt.Errorf("activities found but no %s stream data cached\n"+
+					"Fetch streams for specific activities first:\n"+
+					"  strava-pp-cli activities streams get-activity <id> --keys %s\n"+
+					"Then re-run training zones.", zoneType, streamKey)
 			}
 
 			var result []zoneWeekRow

@@ -72,9 +72,13 @@ Requires activities with power meter data synced with stream data.`,
 			}
 			defer db.Close()
 
-			query := `SELECT s.data FROM activities_streams s
-JOIN resources r ON r.id = s.activities_id
-WHERE r.resource_type IN ('athlete-activities', 'activities')`
+			// Stream data is stored in the generic resources table under
+			// resource_type='streams' (written by "activities streams get-activity <id>"),
+			// NOT in the activities_streams typed table (which sync never populates).
+			// Join on id: resources.id for a streams row equals the activity_id.
+			query := `SELECT s.data FROM resources s
+JOIN resources r ON r.id = s.id AND r.resource_type IN ('athlete-activities', 'activities')
+WHERE s.resource_type = 'streams'`
 			var qargs []any
 			if since != "" {
 				query += ` AND COALESCE(json_extract(r.data, '$.start_date'), '') >= ?`
@@ -109,6 +113,21 @@ WHERE r.resource_type IN ('athlete-activities', 'activities')`
 			}
 			if err := rows.Err(); err != nil {
 				return fmt.Errorf("reading rows: %w", err)
+			}
+
+			// If no stream data was found, return a clear error rather than silent 0W output.
+			hasData := false
+			for _, w := range bestWatts {
+				if w > 0 {
+					hasData = true
+					break
+				}
+			}
+			if !hasData {
+				return fmt.Errorf("no power stream data found in local cache\n" +
+					"Fetch streams for specific activities first:\n" +
+					"  strava-pp-cli activities streams get-activity <id> --keys watts\n" +
+					"Then re-run power-curve.")
 			}
 
 			var result []powerCurveRow
