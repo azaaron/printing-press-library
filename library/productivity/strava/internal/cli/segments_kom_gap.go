@@ -90,9 +90,22 @@ Requires read scope for leaderboard access.`,
 				if err := json.Unmarshal([]byte(data.String), &seg); err != nil {
 					continue
 				}
+				// Handle two schemas stored by sync:
+				// 'segments' rows: flat {id, name, distance, ...}
+				// 'starred' rows:  {id, segment: {id, name, distance, ...}}
 				name, _ := seg["name"].(string)
-				dist := jsonFloat(seg, "distance") / 1000
-				segments = append(segments, segInfo{id: id.String, name: name, distance: dist})
+				dist := jsonFloat(seg, "distance")
+				if name == "" || dist == 0 {
+					if nested, ok := seg["segment"].(map[string]any); ok {
+						if name == "" {
+							name, _ = nested["name"].(string)
+						}
+						if dist == 0 {
+							dist = jsonFloat(nested, "distance")
+						}
+					}
+				}
+				segments = append(segments, segInfo{id: id.String, name: name, distance: dist / 1000})
 			}
 			if err := rows.Err(); err != nil {
 				return fmt.Errorf("reading rows: %w", err)

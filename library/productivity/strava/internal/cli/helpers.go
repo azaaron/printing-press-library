@@ -1775,6 +1775,7 @@ func extractStreamValues(streamJSON string, key string) []float64 {
 	if err := json.Unmarshal([]byte(streamJSON), &blob); err != nil {
 		return nil
 	}
+	// Shape (a): single-stream object {"data":[...], "type":"heartrate", ...}
 	if data, ok := blob["data"].([]any); ok {
 		vals := make([]float64, 0, len(data))
 		for _, v := range data {
@@ -1784,6 +1785,7 @@ func extractStreamValues(streamJSON string, key string) []float64 {
 		}
 		return vals
 	}
+	// Shape (b): flat keyed map {"heartrate":[...], "watts":[...]}
 	if arr, ok := blob[key].([]any); ok {
 		vals := make([]float64, 0, len(arr))
 		for _, v := range arr {
@@ -1792,6 +1794,19 @@ func extractStreamValues(streamJSON string, key string) []float64 {
 			}
 		}
 		return vals
+	}
+	// Shape (c): keyed-object map — Strava's key_by_type=true response:
+	// {"heartrate":{"type":"heartrate","data":[...],...}, "velocity_smooth":{...}}
+	if nested, ok := blob[key].(map[string]any); ok {
+		if data, ok := nested["data"].([]any); ok {
+			vals := make([]float64, 0, len(data))
+			for _, v := range data {
+				if f, ok := v.(float64); ok {
+					vals = append(vals, f)
+				}
+			}
+			return vals
+		}
 	}
 	return nil
 }

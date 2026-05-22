@@ -146,7 +146,12 @@ GROUP BY gear_id`
 			}
 
 			var result []gearStatusRow
-			for _, agg := range aggs {
+			for i, agg := range aggs {
+				// Sleep between gear metadata calls to avoid consuming the shared
+				// Strava rate-limit budget (200 req/15 min). ~2 req/sec is gentle.
+				if i > 0 {
+					time.Sleep(500 * time.Millisecond)
+				}
 				// Fetch gear metadata from API
 				gearData, getErr := c.Get(cmd.Context(), "/gear/"+agg.gearID, nil)
 				gearName := agg.gearID

@@ -218,9 +218,10 @@ Use --dry-run to preview changes without committing them.`,
 					StartDate: cand.startDate, Action: actionStr, Status: status,
 				})
 
-				// Respect rate limit: 200/15min ≈ 1 req/0.45s; sleep briefly
+				// Strava: 200 req/15 min (900 s) ⟹ ≥4.5 s spacing per write
+				// to stay under the limit for sustained bulk operations.
 				if i < len(candidates)-1 {
-					time.Sleep(100 * time.Millisecond)
+					time.Sleep(4500 * time.Millisecond)
 				}
 			}
 
