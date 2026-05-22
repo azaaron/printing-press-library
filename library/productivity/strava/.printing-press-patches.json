@@ -35,6 +35,12 @@
       "reason": "Both commands JOINed on the activities_streams typed table, which sync never populates. Individual stream fetches write to the generic resources table under resource_type='streams'. Repointed queries to resources JOIN on id. Added actionable error when no stream data is cached instead of silent all-zero output.",
       "files": ["internal/cli/athletes_power_curve.go", "internal/cli/training_zones.go"],
       "validated_outcome": "Commands now query the correct table and return an error with instructions (run 'activities streams get-activity <id>') when no streams are cached."
+    },
+    {
+      "id": "segments-progress-pagination",
+      "summary": "Add full pagination loop to segments_progress (was silently truncating at 200 efforts).",
+      "reason": "per_page is capped at 200 (Strava's max). Athletes with >200 efforts on a segment had the tail silently dropped, giving a wrong PR and an incomplete history. Added a page-loop that stops when Strava returns an empty page; --limit still caps early.",
+      "files": ["internal/cli/segments_progress.go"]
     }
   ]
 }

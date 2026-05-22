@@ -61,22 +61,45 @@ Requires activity:read_all scope for private efforts.`,
 				return err
 			}
 
-			params := map[string]string{"per_page": "200"}
-			if since != "" {
-				params["start_date_local"] = since + "T00:00:00Z"
-			}
-			if limit > 0 {
-				params["per_page"] = fmt.Sprintf("%d", limit)
-			}
-
-			data, err := c.Get(cmd.Context(), "/segments/"+segmentID+"/all_efforts", params)
-			if err != nil {
-				return fmt.Errorf("fetching segment efforts (requires activity:read_all scope): %w", err)
-			}
-
+			// Paginate until Strava returns an empty page (max 200 per page).
+			// When --limit > 0 we stop early after collecting enough efforts.
 			var efforts []map[string]any
-			if err := json.Unmarshal(data, &efforts); err != nil {
-				return fmt.Errorf("parsing efforts: %w", err)
+			for page := 1; ; page++ {
+				pageSize := 200
+				if limit > 0 && limit-len(efforts) < pageSize {
+					pageSize = limit - len(efforts)
+					if pageSize <= 0 {
+						break
+					}
+				}
+				params := map[string]string{
+					"per_page": fmt.Sprintf("%d", pageSize),
+					"page":     fmt.Sprintf("%d", page),
+				}
+				if since != "" {
+					params["start_date_local"] = since + "T00:00:00Z"
+				}
+
+				data, err := c.Get(cmd.Context(), "/segments/"+segmentID+"/all_efforts", params)
+				if err != nil {
+					return fmt.Errorf("fetching segment efforts (requires activity:read_all scope): %w", err)
+				}
+				var page_efforts []map[string]any
+				if err := json.Unmarshal(data, &page_efforts); err != nil {
+					return fmt.Errorf("parsing efforts: %w", err)
+				}
+				if len(page_efforts) == 0 {
+					break
+				}
+				efforts = append(efforts, page_efforts...)
+				if limit > 0 && len(efforts) >= limit {
+					efforts = efforts[:limit]
+					break
+				}
+				// Strava returns fewer than per_page on the last page
+				if len(page_efforts) < pageSize {
+					break
+				}
 			}
 
 			if len(efforts) == 0 {
