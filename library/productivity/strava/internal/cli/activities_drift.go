@@ -114,10 +114,15 @@ Without an ID, analyzes recent activities above --min-duration.`,
 			}
 
 			var result []driftRow
-			for _, cand := range candidates {
+			for i, cand := range candidates {
 				actID := cand.id
 				if cliutil.IsDogfoodEnv() && len(result) >= 2 {
 					break
+				}
+
+				// Rate-limit: ~2 req/sec for stream fetches
+				if i > 0 {
+					time.Sleep(500 * time.Millisecond)
 				}
 
 				// Fetch streams: heartrate + velocity_smooth

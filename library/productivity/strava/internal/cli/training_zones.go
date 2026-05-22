@@ -31,8 +31,10 @@ func newTrainingZonesCmd(flags *rootFlags) *cobra.Command {
 		Short:       "See minutes spent in each HR or power zone per week",
 		Annotations: map[string]string{"mcp:read-only": "true"},
 		Long: `Shows how many minutes per week you spent in each heart rate or power zone.
-Fetches zone thresholds from the Strava API, then analyzes synced stream data.
-Streams must be present in the local database.`,
+Fetches zone thresholds from /athlete/zones, then fetches streams live per
+activity from the Strava API. Rate-limited to ~2 req/sec per activity.
+
+Activities must be synced first ('strava-pp-cli sync').`,
 		Example: strings.Trim(`
   strava-pp-cli training zones --weeks 8
   strava-pp-cli training zones --weeks 4 --type Run --zone-type heartrate --agent
@@ -87,50 +89,83 @@ Streams must be present in the local database.`,
 				streamKey = "watts"
 			}
 
-			// Stream data is stored in the generic resources table under
-			// resource_type='streams' (written by "activities streams get-activity <id>"),
-			// NOT in activities_streams typed table (which sync never populates).
-			// Left-join on id: a streams row id equals the originating activity_id.
-			query := `SELECT r.data, s.data
-FROM resources r
-LEFT JOIN resources s ON s.id = r.id AND s.resource_type = 'streams'
-WHERE r.resource_type IN ('athlete-activities', 'activities')
-AND COALESCE(json_extract(r.data, '$.start_date'), '') >= ?`
+			// Load activity IDs and start_dates from the local store.
+			// Streams are fetched live below — writeThroughCache cannot store
+			// StreamSet responses (no "id" field in the response body), so the
+			// local activities_streams / resources('streams') tables are never
+			// populated by the stream-get commands.
+			query := `SELECT id, data FROM resources
+WHERE resource_type IN ('athlete-activities', 'activities')
+AND COALESCE(json_extract(data, '$.start_date'), '') >= ?`
 			qargs := []any{cutoff.Format("2006-01-02T15:04:05Z")}
 			if activityType != "" {
-				query += ` AND json_extract(r.data, '$.type') = ?`
+				query += ` AND json_extract(data, '$.type') = ?`
 				qargs = append(qargs, activityType)
 			}
-			query += ` ORDER BY json_extract(r.data, '$.start_date') ASC`
+			query += ` ORDER BY json_extract(data, '$.start_date') ASC`
 
 			rows, err := db.DB().QueryContext(cmd.Context(), query, qargs...)
 			if err != nil {
-				return fmt.Errorf("querying activities with streams: %w", err)
+				return fmt.Errorf("querying activities: %w", err)
 			}
 			defer rows.Close()
 
-			weekZones := map[string][]float64{}
-			var weekOrder []string
-
+			type actEntry struct {
+				id        string
+				startDate string
+			}
+			var activities []actEntry
 			for rows.Next() {
-				var actData, streamDataRaw sql.NullString
-				if err := rows.Scan(&actData, &streamDataRaw); err != nil || !actData.Valid {
+				var id, data sql.NullString
+				if err := rows.Scan(&id, &data); err != nil || !data.Valid {
 					continue
 				}
 				var act map[string]any
-				if err := json.Unmarshal([]byte(actData.String), &act); err != nil {
+				if err := json.Unmarshal([]byte(data.String), &act); err != nil {
 					continue
 				}
 				startRaw, _ := act["start_date"].(string)
-				if startRaw == "" {
-					continue
+				activities = append(activities, actEntry{id: id.String, startDate: startRaw})
+			}
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("reading rows: %w", err)
+			}
+
+			if len(activities) == 0 {
+				return fmt.Errorf("no activities found in local store for the past %d weeks\n"+
+					"Run 'strava-pp-cli sync' to populate activity data first.", weeks)
+			}
+
+			// Fetch streams live per activity and accumulate zone minutes per week.
+			weekZones := map[string][]float64{}
+			var weekOrder []string
+			streamsFound := false
+
+			for i, act := range activities {
+				if cliutil.IsDogfoodEnv() && i >= 2 {
+					break
 				}
-				t, err := time.Parse(time.RFC3339, startRaw)
+				// Rate-limit: ~2 req/sec
+				if i > 0 {
+					time.Sleep(500 * time.Millisecond)
+				}
+
+				streamData, err := c.Get(cmd.Context(),
+					"/activities/"+act.id+"/streams",
+					map[string]string{"keys": streamKey, "key_by_type": "true"})
 				if err != nil {
+					continue // skip activities without stream access
+				}
+
+				values := extractStreamValues(string(streamData), streamKey)
+				if len(values) == 0 {
 					continue
 				}
 
-				// Monday-anchored week key
+				t, err := time.Parse(time.RFC3339, act.startDate)
+				if err != nil {
+					continue
+				}
 				weekDay := int(t.Weekday())
 				if weekDay == 0 {
 					weekDay = 7
@@ -140,40 +175,20 @@ AND COALESCE(json_extract(r.data, '$.start_date'), '') >= ?`
 					weekZones[wk] = make([]float64, numZones)
 					weekOrder = append(weekOrder, wk)
 				}
-				if !streamDataRaw.Valid {
-					continue
-				}
-				values := extractStreamValues(streamDataRaw.String, streamKey)
+
 				for _, val := range values {
 					z := classifyZone(val, thresholds)
 					if z >= 0 && z < numZones {
 						weekZones[wk][z] += 1.0 / 60.0 // seconds → minutes
+						streamsFound = true
 					}
 				}
-			}
-			if err := rows.Err(); err != nil {
-				return fmt.Errorf("reading rows: %w", err)
 			}
 
-			// Detect all-zero output: activities found but no stream data cached.
-			// This means streams haven't been fetched for any activity yet.
-			streamsFound := false
-			for _, zones := range weekZones {
-				for _, m := range zones {
-					if m > 0 {
-						streamsFound = true
-						break
-					}
-				}
-				if streamsFound {
-					break
-				}
-			}
-			if len(weekOrder) > 0 && !streamsFound {
-				return fmt.Errorf("activities found but no %s stream data cached\n"+
-					"Fetch streams for specific activities first:\n"+
-					"  strava-pp-cli activities streams get-activity <id> --keys %s\n"+
-					"Then re-run training zones.", zoneType, streamKey)
+			if !streamsFound {
+				return fmt.Errorf("no %s stream data returned for any activity\n"+
+					"Requires activities recorded with %s sensor and activity:read_all scope.",
+					zoneType, zoneType)
 			}
 
 			var result []zoneWeekRow

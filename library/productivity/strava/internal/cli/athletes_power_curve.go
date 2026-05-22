@@ -4,9 +4,11 @@ package cli
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/mvanhorn/printing-press-library/library/productivity/strava/internal/cliutil"
@@ -42,10 +44,12 @@ func newAthletesPowerCurveCmd(flags *rootFlags) *cobra.Command {
 		Use:         "power-curve",
 		Short:       "See your best mean power for each standard duration (1s to 60min)",
 		Annotations: map[string]string{"mcp:read-only": "true"},
-		Long: `Computes your best mean power (W) for each standard duration window from
-synced activity stream data. Optionally normalizes to W/kg with --weight.
+		Long: `Computes your best mean power (W) for each standard duration window by
+fetching power streams live from the Strava API for activities in the local
+store. Optionally normalizes to W/kg with --weight.
 
-Requires activities with power meter data synced with stream data.`,
+Activities must be synced first ('strava-pp-cli sync'). Stream data is fetched
+live — one API call per activity with power data. Rate-limited to ~2 req/sec.`,
 		Example: strings.Trim(`
   strava-pp-cli athlete power-curve
   strava-pp-cli athlete power-curve --since 2025-01-01 --weight 72 --agent
@@ -72,62 +76,83 @@ Requires activities with power meter data synced with stream data.`,
 			}
 			defer db.Close()
 
-			// Stream data is stored in the generic resources table under
-			// resource_type='streams' (written by "activities streams get-activity <id>"),
-			// NOT in the activities_streams typed table (which sync never populates).
-			// Join on id: resources.id for a streams row equals the activity_id.
-			query := `SELECT s.data FROM resources s
-JOIN resources r ON r.id = s.id AND r.resource_type IN ('athlete-activities', 'activities')
-WHERE s.resource_type = 'streams'`
+			// Fetch activity IDs from local store (sync populates this).
+			// Filter to activities that have weighted_average_watts > 0 as a
+			// cheap pre-filter — avoids fetching streams for non-power activities.
+			query := `SELECT id FROM resources
+WHERE resource_type IN ('athlete-activities', 'activities')
+AND COALESCE(json_extract(data, '$.weighted_average_watts'), 0) > 0`
 			var qargs []any
 			if since != "" {
-				query += ` AND COALESCE(json_extract(r.data, '$.start_date'), '') >= ?`
+				query += ` AND COALESCE(json_extract(data, '$.start_date'), '') >= ?`
 				qargs = append(qargs, since+"T00:00:00Z")
 			}
+			query += ` ORDER BY json_extract(data, '$.start_date') DESC`
 
 			rows, err := db.DB().QueryContext(cmd.Context(), query, qargs...)
 			if err != nil {
-				return fmt.Errorf("querying activity streams: %w", err)
+				return fmt.Errorf("querying activities: %w", err)
 			}
 			defer rows.Close()
 
-			// Track best mean power per window across all activities
-			bestWatts := make([]float64, len(powerCurveWindows))
-
+			var activityIDs []string
 			for rows.Next() {
-				var streamData sql.NullString
-				if err := rows.Scan(&streamData); err != nil || !streamData.Valid {
+				var id sql.NullString
+				if err := rows.Scan(&id); err != nil || !id.Valid {
 					continue
 				}
-				wattsArray := extractStreamValues(streamData.String, "watts")
-				if len(wattsArray) == 0 {
-					continue
-				}
-				// Sliding window max for each duration
-				for i, win := range powerCurveWindows {
-					best := slidingWindowMean(wattsArray, win.seconds)
-					if best > bestWatts[i] {
-						bestWatts[i] = best
-					}
-				}
+				activityIDs = append(activityIDs, id.String)
 			}
 			if err := rows.Err(); err != nil {
 				return fmt.Errorf("reading rows: %w", err)
 			}
 
-			// If no stream data was found, return a clear error rather than silent 0W output.
-			hasData := false
-			for _, w := range bestWatts {
-				if w > 0 {
-					hasData = true
+			if len(activityIDs) == 0 {
+				return fmt.Errorf("no power-meter activities found in local store\n" +
+					"Run 'strava-pp-cli sync' to populate activity data first.")
+			}
+
+			c, err := flags.newClient()
+			if err != nil {
+				return err
+			}
+
+			// Fetch watts streams live per activity; compute sliding-window max.
+			bestWatts := make([]float64, len(powerCurveWindows))
+			fetched := 0
+
+			for i, actID := range activityIDs {
+				if cliutil.IsDogfoodEnv() && i >= 2 {
 					break
 				}
+				// Rate-limit: ~2 req/sec for stream fetches
+				if i > 0 {
+					time.Sleep(500 * time.Millisecond)
+				}
+
+				streamData, err := c.Get(cmd.Context(),
+					"/activities/"+actID+"/streams",
+					map[string]string{"keys": "watts", "key_by_type": "true"})
+				if err != nil {
+					continue // skip activities without stream access
+				}
+
+				wattsArray := extractStreamValues(string(streamData), "watts")
+				if len(wattsArray) == 0 {
+					continue
+				}
+				fetched++
+				for j, win := range powerCurveWindows {
+					best := slidingWindowMean(wattsArray, win.seconds)
+					if best > bestWatts[j] {
+						bestWatts[j] = best
+					}
+				}
 			}
-			if !hasData {
-				return fmt.Errorf("no power stream data found in local cache\n" +
-					"Fetch streams for specific activities first:\n" +
-					"  strava-pp-cli activities streams get-activity <id> --keys watts\n" +
-					"Then re-run power-curve.")
+
+			if fetched == 0 {
+				return fmt.Errorf("no power stream data returned for any activity\n" +
+					"Requires activities recorded with a power meter and activity:read_all scope.")
 			}
 
 			var result []powerCurveRow
@@ -144,6 +169,7 @@ WHERE s.resource_type = 'streams'`
 				result = append(result, row)
 			}
 
+			_ = json.Marshal // keep import used via printJSONFiltered
 			return printJSONFiltered(cmd.OutOrStdout(), result, flags)
 		},
 	}
@@ -159,7 +185,6 @@ WHERE s.resource_type = 'streams'`
 func slidingWindowMean(vals []float64, windowSec int) float64 {
 	n := len(vals)
 	if n < windowSec {
-		// Window larger than activity — compute mean of full activity
 		if n == 0 {
 			return 0
 		}
@@ -169,7 +194,6 @@ func slidingWindowMean(vals []float64, windowSec int) float64 {
 		}
 		return sum / float64(n)
 	}
-	// Compute initial window
 	sum := 0.0
 	for i := 0; i < windowSec; i++ {
 		sum += vals[i]
