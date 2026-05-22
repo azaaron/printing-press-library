@@ -164,11 +164,6 @@ Without an ID, analyzes recent activities above --min-duration.`,
 }
 
 func computeDrift(actID string, act map[string]any, streamData json.RawMessage, threshold float64) (driftRow, bool) {
-	var streams map[string]map[string]any
-	if err := json.Unmarshal(streamData, &streams); err != nil {
-		return driftRow{}, false
-	}
-
 	hrStream := extractStreamValues(string(streamData), "heartrate")
 	velStream := extractStreamValues(string(streamData), "velocity_smooth")
 	if len(hrStream) < 60 || len(velStream) < 60 {

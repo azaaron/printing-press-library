@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/mvanhorn/printing-press-library/library/productivity/strava/internal/cliutil"
@@ -126,8 +127,10 @@ Requires read scope for leaderboard access.`,
 					break
 				}
 
-				// Get athlete's best effort for this segment from local store
-				effortQuery := `SELECT data FROM resources WHERE resource_type = 'segment_efforts' AND json_extract(data, '$.segment.id') = ? ORDER BY json_extract(data, '$.elapsed_time') ASC LIMIT 1`
+				// Get athlete's best effort for this segment from local store.
+				// The store writes resource_type='segment-efforts' (hyphen, matching
+				// the API interface name), not 'segment_efforts' (underscore).
+				effortQuery := `SELECT data FROM resources WHERE resource_type = 'segment-efforts' AND json_extract(data, '$.segment.id') = ? ORDER BY json_extract(data, '$.elapsed_time') ASC LIMIT 1`
 				effortRow := db.DB().QueryRowContext(cmd.Context(), effortQuery, seg.id)
 				var effortData sql.NullString
 				myBestSec := 0
@@ -176,6 +179,10 @@ Requires read scope for leaderboard access.`,
 					GapSec:    gapSec,
 					GapPct:    gapPct,
 				})
+
+				// Throttle leaderboard calls — one per starred segment can exhaust
+				// Strava's 200 req/15 min quota quickly without a delay.
+				time.Sleep(500 * time.Millisecond)
 			}
 
 			// Sort by gap ascending (smallest gap first = most closeable)
