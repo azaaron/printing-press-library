@@ -38,7 +38,7 @@ func createTestDB(t *testing.T) *sql.DB {
 		)`,
 		`CREATE TABLE ExerciseSet (
 			id TEXT PRIMARY KEY,
-			exerciseId TEXT NOT NULL,
+			exerciseId TEXT NOT NULL REFERENCES Exercise(id) ON DELETE CASCADE,
 			reps INTEGER NOT NULL DEFAULT 0,
 			weightLbs REAL NOT NULL DEFAULT 0,
 			"order" INTEGER NOT NULL DEFAULT 0
@@ -76,10 +76,18 @@ func TestUpsertAndExists(t *testing.T) {
 		t.Error("ExistsOnDate = false after Upsert, want true")
 	}
 
-	// Upsert again — should update, not error
+	// Upsert again — should update, not leave orphaned ExerciseSet rows
 	sess.Title = "Updated"
 	if err := Upsert(db, sess); err != nil {
 		t.Fatalf("second Upsert: %v", err)
+	}
+	// Verify cascade: exactly one ExerciseSet row should exist (no orphans)
+	var setCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ExerciseSet`).Scan(&setCount); err != nil {
+		t.Fatalf("counting ExerciseSet: %v", err)
+	}
+	if setCount != 1 {
+		t.Errorf("ExerciseSet count = %d after re-upsert, want 1 (orphaned rows from broken cascade)", setCount)
 	}
 
 	// Different date → not found

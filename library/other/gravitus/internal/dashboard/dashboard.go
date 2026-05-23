@@ -44,6 +44,16 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening dashboard db %s: %w", dbPath, err)
 	}
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("%s: %w", pragma, err)
+		}
+	}
 	return db, nil
 }
 

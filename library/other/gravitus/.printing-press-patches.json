@@ -33,6 +33,18 @@
       "files": ["internal/dashboard/dashboard.go"],
       "summary": "Fix newCUID to emit 25-character lowercase-alphanumeric IDs matching Prisma's cuid() format.",
       "reason": "Previous implementation prefixed a full UUID string (37 chars with hyphens) with 'c'; Prisma cuid() expects c + 24 lowercase alphanumeric chars."
+    },
+    {
+      "id": "greptile-6-mcp-read-only-annotation",
+      "files": ["internal/cli/gravitus_sync_impl.go"],
+      "summary": "Remove mcp:read-only annotation from gravitus-sync.",
+      "reason": "gravitus-sync writes to two SQLite databases; the read-only hint caused MCP hosts to either skip permission gating or refuse to run the command entirely."
+    },
+    {
+      "id": "greptile-7-dashboard-fk-pragma",
+      "files": ["internal/dashboard/dashboard.go", "internal/dashboard/dashboard_test.go"],
+      "summary": "Add PRAGMA foreign_keys=ON (plus WAL and busy_timeout) to OpenDB; add FK constraint and cascade-delete test.",
+      "reason": "OpenDB opened without foreign_keys=ON so ON DELETE CASCADE on ExerciseSet never fired; re-syncing an existing session orphaned ExerciseSet rows on every update."
     }
   ]
 }

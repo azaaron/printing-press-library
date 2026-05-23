@@ -47,7 +47,7 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 			`  # Specify your Gravitus user ID explicitly`,
 			`  gravitus-pp-cli gravitus-sync --user-id YOUR_USER_ID --dashboard-db ./prisma/dev.db`,
 		}, "\n"),
-		Annotations: map[string]string{"mcp:read-only": "true"},
+		Annotations: map[string]string{},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dryRunOK(flags) {
 				return nil

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "generated_at": "2026-05-18T07:45:49.0272565Z",
-  "printing_press_version": "4.8.0",
+  "printing_press_version": "4.11.0",
   "api_name": "gravitus",
   "display_name": "Gravitus",
   "cli_name": "gravitus-pp-cli",
