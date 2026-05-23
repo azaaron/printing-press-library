@@ -5,6 +5,7 @@ package dashboard
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,15 +36,20 @@ type LiftingSession struct {
 	CreatedAt time.Time
 }
 
-// Upsert writes a LiftingSession (and its exercises) to the dashboard's SQLite
-// database using the same (date, source) unique constraint that Prisma enforces.
-func Upsert(dbPath string, s LiftingSession) error {
+// OpenDB opens the dashboard SQLite database. The caller is responsible for
+// calling Close when done. Sharing one *sql.DB across all Upsert/ExistsOnDate
+// calls in a sync loop avoids the per-call open/close overhead.
+func OpenDB(dbPath string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		return fmt.Errorf("opening dashboard db %s: %w", dbPath, err)
+		return nil, fmt.Errorf("opening dashboard db %s: %w", dbPath, err)
 	}
-	defer db.Close()
+	return db, nil
+}
 
+// Upsert writes a LiftingSession (and its exercises) to the dashboard's SQLite
+// database using the same (date, source) unique constraint that Prisma enforces.
+func Upsert(db *sql.DB, s LiftingSession) error {
 	if s.Source == "" {
 		s.Source = "gravitus"
 	}
@@ -124,19 +130,13 @@ func Upsert(dbPath string, s LiftingSession) error {
 }
 
 // ExistsOnDate returns true if a LiftingSession with (date, source) already exists.
-func ExistsOnDate(dbPath string, date time.Time, source string) (bool, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return false, fmt.Errorf("opening dashboard db: %w", err)
-	}
-	defer db.Close()
-
+func ExistsOnDate(db *sql.DB, date time.Time, source string) (bool, error) {
 	if source == "" {
 		source = "gravitus"
 	}
 
 	var id string
-	err = db.QueryRow(
+	err := db.QueryRow(
 		`SELECT id FROM LiftingSession WHERE date = ? AND source = ?`,
 		date.UTC().Format("2006-01-02T15:04:05.000Z"), source,
 	).Scan(&id)
@@ -151,15 +151,9 @@ func ExistsOnDate(dbPath string, date time.Time, source string) (bool, error) {
 
 // TableExists checks whether the LiftingSession table is present in the database.
 // Used by doctor to verify the dashboard DB is valid.
-func TableExists(dbPath string) (bool, error) {
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return false, fmt.Errorf("opening dashboard db: %w", err)
-	}
-	defer db.Close()
-
+func TableExists(db *sql.DB) (bool, error) {
 	var name string
-	err = db.QueryRow(
+	err := db.QueryRow(
 		`SELECT name FROM sqlite_master WHERE type='table' AND name='LiftingSession'`,
 	).Scan(&name)
 	if err == sql.ErrNoRows {
@@ -178,7 +172,8 @@ func nullStr(s string) interface{} {
 	return s
 }
 
-// newCUID generates a unique ID compatible with Prisma's cuid() output shape.
+// newCUID generates a 25-character ID matching Prisma's cuid() format:
+// lowercase 'c' followed by 24 lowercase hex characters.
 func newCUID() string {
-	return fmt.Sprintf("c%s", uuid.New().String())
+	return "c" + strings.ReplaceAll(uuid.New().String(), "-", "")[:24]
 }

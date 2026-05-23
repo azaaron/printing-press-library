@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
+	"golang.org/x/term"
 
 	"github.com/spf13/cobra"
 	"github.com/mvanhorn/printing-press-library/library/other/gravitus/internal/config"
@@ -224,11 +225,10 @@ func prompt(r io.Reader, w io.Writer, label string) (string, error) {
 
 func promptSecret(w io.Writer, label string) (string, error) {
 	fmt.Fprint(w, label)
-	// On Windows, we can't easily suppress echo without syscall.
-	// Just use a regular scan — users can run in a private terminal.
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		return strings.TrimSpace(scanner.Text()), nil
+	pw, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(w) // newline after hidden input
+	if err != nil {
+		return "", fmt.Errorf("reading password: %w", err)
 	}
-	return "", fmt.Errorf("no input")
+	return strings.TrimSpace(string(pw)), nil
 }

@@ -71,10 +71,18 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 				dashboardDB = cfg.DashboardDBPath()
 			}
 
-			// Validate dashboard DB if provided
+			// Open dashboard DB once — shared for validation, incremental checks,
+			// and upserts to avoid a sql.Open/Close round-trip per workout.
+			var dashDB *sql.DB
 			if dashboardDB != "" {
-				if ok, err := dashboard.TableExists(dashboardDB); err != nil {
-					return fmt.Errorf("cannot open dashboard db %s: %w", dashboardDB, err)
+				var dbErr error
+				dashDB, dbErr = dashboard.OpenDB(dashboardDB)
+				if dbErr != nil {
+					return fmt.Errorf("cannot open dashboard db %s: %w", dashboardDB, dbErr)
+				}
+				defer dashDB.Close()
+				if ok, dbErr := dashboard.TableExists(dashDB); dbErr != nil {
+					return fmt.Errorf("reading dashboard db %s: %w", dashboardDB, dbErr)
 				} else if !ok {
 					return fmt.Errorf("dashboard db %s does not have a LiftingSession table — is this the right file? Expected prisma/dev.db", dashboardDB)
 				}
@@ -109,8 +117,10 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 			fmt.Fprintf(w, "Fetching workout list for user %s...\n", userID)
 			var allSummaries []scraper.WorkoutSummary
 			page := 1
+			cappedByLimit := false
 			for {
 				if maxPages > 0 && page > maxPages {
+					cappedByLimit = true
 					break
 				}
 				pageURL := fmt.Sprintf("%s/users/%s/?page=%d", baseURL, userID, page)
@@ -134,6 +144,9 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 				time.Sleep(200 * time.Millisecond) // polite rate limiting
 			}
 
+			if cappedByLimit {
+				fmt.Fprintf(w, "Warning: stopped at page limit (%d pages). Use --max-pages=0 for an unlimited sync.\n", maxPages)
+			}
 			fmt.Fprintf(w, "Total workouts found: %d\n", len(allSummaries))
 
 			// Phase 2: fetch and parse each workout
@@ -142,8 +155,8 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 
 			for i, s := range allSummaries {
 				// Incremental: skip if already in dashboard DB
-				if incremental && dashboardDB != "" {
-					exists, err := dashboard.ExistsOnDate(dashboardDB, s.Date, "gravitus")
+				if incremental && dashDB != nil {
+					exists, err := dashboard.ExistsOnDate(dashDB, s.Date, "gravitus")
 					if err == nil && exists {
 						skipped++
 						continue
@@ -185,7 +198,7 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 				}
 
 				// Write to dashboard DB
-				if dashboardDB != "" {
+				if dashDB != nil {
 					var exEntries []dashboard.ExerciseEntry
 					for _, ex := range wo.Exercises {
 						entry := dashboard.ExerciseEntry{Name: ex.Name}
@@ -205,7 +218,7 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 						Exercises: exEntries,
 						Source:    "gravitus",
 					}
-					if err := dashboard.Upsert(dashboardDB, sess); err != nil {
+					if err := dashboard.Upsert(dashDB, sess); err != nil {
 						errs = append(errs, fmt.Sprintf("dashboard write for workout %s: %v", s.ID, err))
 						continue
 					}
@@ -321,6 +334,16 @@ func openLocalDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
+	}
+	for _, pragma := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA busy_timeout=5000",
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("%s: %w", pragma, err)
+		}
 	}
 	if err := initLocalSchema(db); err != nil {
 		db.Close()

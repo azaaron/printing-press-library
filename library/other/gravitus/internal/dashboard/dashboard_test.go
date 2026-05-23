@@ -1,3 +1,5 @@
+// Copyright 2026 CLI Printing Press. Licensed under Apache-2.0. See LICENSE.
+
 package dashboard
 
 import (
@@ -9,50 +11,48 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func createTestDB(t *testing.T) string {
+func createTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := sql.Open("sqlite", path)
+	db, err := OpenDB(path)
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatalf("OpenDB: %v", err)
 	}
-	defer db.Close()
-	_, err = db.Exec(`CREATE TABLE LiftingSession (
-		id TEXT PRIMARY KEY,
-		date TEXT NOT NULL,
-		title TEXT NOT NULL,
-		notes TEXT,
-		source TEXT NOT NULL DEFAULT 'gravitus',
-		createdAt TEXT NOT NULL,
-		UNIQUE(date, source)
-	)`)
-	if err != nil {
-		t.Fatalf("create LiftingSession table: %v", err)
+	t.Cleanup(func() { db.Close() })
+
+	for _, stmt := range []string{
+		`CREATE TABLE LiftingSession (
+			id TEXT PRIMARY KEY,
+			date TEXT NOT NULL,
+			title TEXT NOT NULL,
+			notes TEXT,
+			source TEXT NOT NULL DEFAULT 'gravitus',
+			createdAt TEXT NOT NULL,
+			UNIQUE(date, source)
+		)`,
+		`CREATE TABLE Exercise (
+			id TEXT PRIMARY KEY,
+			sessionId TEXT NOT NULL,
+			name TEXT NOT NULL,
+			"order" INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE ExerciseSet (
+			id TEXT PRIMARY KEY,
+			exerciseId TEXT NOT NULL,
+			reps INTEGER NOT NULL DEFAULT 0,
+			weightLbs REAL NOT NULL DEFAULT 0,
+			"order" INTEGER NOT NULL DEFAULT 0
+		)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("create schema: %v", err)
+		}
 	}
-	_, err = db.Exec(`CREATE TABLE Exercise (
-		id TEXT PRIMARY KEY,
-		sessionId TEXT NOT NULL,
-		name TEXT NOT NULL,
-		"order" INTEGER NOT NULL DEFAULT 0
-	)`)
-	if err != nil {
-		t.Fatalf("create Exercise table: %v", err)
-	}
-	_, err = db.Exec(`CREATE TABLE ExerciseSet (
-		id TEXT PRIMARY KEY,
-		exerciseId TEXT NOT NULL,
-		reps INTEGER NOT NULL DEFAULT 0,
-		weightLbs REAL NOT NULL DEFAULT 0,
-		"order" INTEGER NOT NULL DEFAULT 0
-	)`)
-	if err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	return path
+	return db
 }
 
 func TestUpsertAndExists(t *testing.T) {
-	path := createTestDB(t)
+	db := createTestDB(t)
 	date := time.Date(2026, 5, 17, 0, 0, 0, 0, time.UTC)
 
 	sess := LiftingSession{
@@ -64,11 +64,11 @@ func TestUpsertAndExists(t *testing.T) {
 		Source: "gravitus",
 	}
 
-	if err := Upsert(path, sess); err != nil {
+	if err := Upsert(db, sess); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 
-	exists, err := ExistsOnDate(path, date, "gravitus")
+	exists, err := ExistsOnDate(db, date, "gravitus")
 	if err != nil {
 		t.Fatalf("ExistsOnDate: %v", err)
 	}
@@ -78,13 +78,13 @@ func TestUpsertAndExists(t *testing.T) {
 
 	// Upsert again — should update, not error
 	sess.Title = "Updated"
-	if err := Upsert(path, sess); err != nil {
+	if err := Upsert(db, sess); err != nil {
 		t.Fatalf("second Upsert: %v", err)
 	}
 
 	// Different date → not found
 	other := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	exists2, err := ExistsOnDate(path, other, "gravitus")
+	exists2, err := ExistsOnDate(db, other, "gravitus")
 	if err != nil {
 		t.Fatalf("ExistsOnDate (miss): %v", err)
 	}
@@ -94,8 +94,8 @@ func TestUpsertAndExists(t *testing.T) {
 }
 
 func TestTableExists(t *testing.T) {
-	path := createTestDB(t)
-	ok, err := TableExists(path)
+	db := createTestDB(t)
+	ok, err := TableExists(db)
 	if err != nil {
 		t.Fatalf("TableExists: %v", err)
 	}
@@ -108,8 +108,11 @@ func TestNewCUID(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 20; i++ {
 		id := newCUID()
-		if id == "" {
-			t.Fatal("newCUID returned empty string")
+		if len(id) != 25 {
+			t.Fatalf("newCUID length = %d, want 25: %q", len(id), id)
+		}
+		if id[0] != 'c' {
+			t.Fatalf("newCUID does not start with 'c': %q", id)
 		}
 		if seen[id] {
 			t.Fatalf("newCUID returned duplicate: %s", id)
