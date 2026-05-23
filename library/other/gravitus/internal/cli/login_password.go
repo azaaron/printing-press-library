@@ -92,7 +92,7 @@ Use this instead of --chrome on Windows or when Chrome cookie tools aren't avail
 	}
 
 	cmd.Flags().StringVar(&email, "email", "", "Gravitus account email")
-	cmd.Flags().StringVar(&password, "password", "", "Gravitus account password (omit to be prompted)")
+	cmd.Flags().StringVar(&password, "password", "", "Gravitus account password (omit to be prompted; passing via flag may appear in shell history)")
 	return cmd
 }
 

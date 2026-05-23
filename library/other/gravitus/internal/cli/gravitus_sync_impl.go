@@ -163,12 +163,13 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 					}
 				}
 
+				// Check local store once — drives both the skip gate and the add/updated counter below.
+				existsLocally, _ := localWorkoutExists(localDB, s.ID)
+
 				// Skip if already in local store (unless --full)
-				if !fullSync {
-					if exists, _ := localWorkoutExists(localDB, s.ID); exists {
-						skipped++
-						continue
-					}
+				if !fullSync && existsLocally {
+					skipped++
+					continue
 				}
 
 				fmt.Fprintf(w, "  [%d/%d] Syncing workout %s: %s (%s)...\n",
@@ -224,7 +225,11 @@ each workout detail page, parses exercises/sets/weights, and upserts records.`,
 					}
 				}
 
-				added++
+				if existsLocally {
+					updated++
+				} else {
+					added++
+				}
 				time.Sleep(300 * time.Millisecond) // polite rate limiting
 			}
 

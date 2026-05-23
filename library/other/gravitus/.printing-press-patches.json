@@ -45,6 +45,18 @@
       "files": ["internal/dashboard/dashboard.go", "internal/dashboard/dashboard_test.go"],
       "summary": "Add PRAGMA foreign_keys=ON (plus WAL and busy_timeout) to OpenDB; add FK constraint and cascade-delete test.",
       "reason": "OpenDB opened without foreign_keys=ON so ON DELETE CASCADE on ExerciseSet never fired; re-syncing an existing session orphaned ExerciseSet rows on every update."
+    },
+    {
+      "id": "greptile-8-updated-counter",
+      "files": ["internal/cli/gravitus_sync_impl.go"],
+      "summary": "Fix updated counter to correctly reflect re-synced workouts instead of always showing 0.",
+      "reason": "localWorkoutExists was called only for the skip gate; workouts processed in --full mode always incremented added rather than updated."
+    },
+    {
+      "id": "greptile-9-password-flag-warning",
+      "files": ["internal/cli/login_password.go"],
+      "summary": "Add shell-history warning to --password flag description.",
+      "reason": "Passing a credential via flag exposes it in ps output and shell history; description now advises users to omit the flag and use the interactive prompt instead."
     }
   ]
 }
